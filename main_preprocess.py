@@ -1,3 +1,5 @@
+import tqdm
+from collections import defaultdict
 import keras
 import sklearn.utils.class_weight
 import numpy as np
@@ -11,11 +13,14 @@ from keras.callbacks import Callback
 from keras.utils.np_utils import to_categorical
 from sklearn.metrics import f1_score, recall_score, precision_score
 import re
+from keras import backend as K
 
 TRAIN_CSV_FILEPATH = r'C:\Users\booga\Dropbox\projects\TweetsSentimentAnalysis\data\train.csv'
 TEST_CSV_FILEPATH = r'C:\Users\booga\Dropbox\projects\TweetsSentimentAnalysis\data\test.csv'
 MODEL_FILEPATH = r'C:\Users\booga\Dropbox\projects\TweetsSentimentAnalysis\model.h5'
-VOCAB_SIZE = 30000
+VOCAB_SIZE = 10000
+BATCH_SIZE = 64
+
 
 def hashtag_split_func(x):
     return " ".join([a for a in re.split('([A-Z][a-z]+)', x.group(1)) if a])
@@ -60,7 +65,9 @@ def predict_test(tokenizer, max_words_in_tweets):
     X_test = tokenizer.texts_to_sequences(test_data[:, 1])
     X_test = pad_sequences(X_test, max_words_in_tweets)
     model = keras.models.load_model(MODEL_FILEPATH)
-    model.predict(X_test)
+    predictions = model.predict(X_test)
+    return np.argmax(predictions, axis=1)
+
 
 
 def build_model(input_length):
@@ -104,14 +111,39 @@ def main():
     callbacks = [EarlyStopping(patience=3),
                  ModelCheckpoint(MODEL_FILEPATH, save_best_only=True),
                  Metrics()]
-    model.fit(X, Y,
-              validation_split=0.25,
-              epochs=50,
-              batch_size=64,
-              callbacks=callbacks,
-              class_weight=class_weight)
+    # model.fit(X, Y,
+    #           validation_split=0.25,
+    #           epochs=50,
+    #           batch_size=BATCH_SIZE,
+    #           callbacks=callbacks,
+    #           class_weight=class_weight)
+    print(predict_test(tokenizer, sequence_words_amount))
+    print(get_significant_words(X, tokenizer))
 
-    predict_test(tokenizer, sequence_words_amount)
+
+def get_significant_words(X, tokenizer, n=100):
+    model = keras.models.load_model(MODEL_FILEPATH)
+    word_to_score = defaultdict(list)
+    foo = K.function([model.input, K.learning_phase()], [model.layers[-3].output])
+    # inverse tokenizer words
+    ind_to_word = {v: k for k, v in tokenizer.word_index.items()}
+    ind_to_word[0] = 'N/A'
+    for t in tqdm.tqdm(range(X.shape[0] // BATCH_SIZE)):
+        start = t * BATCH_SIZE
+        end = min((t + 1) * BATCH_SIZE, X.shape[0])
+        seqs = X[start:end, :]
+        out = foo([seqs, 0.0])[0]
+        scores = out[:, :, 1] - out[:, :, 0]
+        for i in range(seqs.shape[0]):
+            for j in range(seqs.shape[1]):
+                word = ind_to_word[seqs[i, j]]
+                word_to_score[word].append(scores[i, j])
+    # avg word_to_score
+    word_to_avg_score = {k: np.mean(v) for k, v in word_to_score.items()}
+    sorted_word_avg_score = sorted(word_to_avg_score.items(), key=lambda x: x[1])
+    return sorted_word_avg_score[-n:]
+
+
 
 
 if __name__ == '__main__':
