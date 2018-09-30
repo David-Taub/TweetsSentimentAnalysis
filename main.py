@@ -9,6 +9,7 @@ from keras.preprocessing.text import Tokenizer
 from keras.preprocessing.sequence import pad_sequences
 from keras.models import Sequential
 from keras.layers import Dense
+from keras.layers import Bidirectional
 from keras.layers import Embedding
 from keras.layers import LSTM
 from keras.layers import SpatialDropout1D
@@ -20,12 +21,15 @@ from keras.utils.np_utils import to_categorical
 from sklearn.metrics import f1_score, recall_score, precision_score
 import re
 from keras import backend as K
+import os
 
-TRAIN_CSV_FILEPATH = r'C:\Users\booga\Dropbox\projects\TweetsSentimentAnalysis\data\train.csv'
-TEST_CSV_FILEPATH = r'C:\Users\booga\Dropbox\projects\TweetsSentimentAnalysis\data\test.csv'
-TEST_CSV_FILEPATH_OUT = r'C:\Users\booga\Dropbox\projects\TweetsSentimentAnalysis\data\test_out.csv'
-MODEL_FILEPATH = r'C:\Users\booga\Dropbox\projects\TweetsSentimentAnalysis\model.h5'
-VOCAB_SIZE = 6000
+
+script_dirpath = os.path.dirname(os.path.abspath(__file__))
+TRAIN_CSV_FILEPATH = os.path.join(script_dirpath, r'data\train.csv')
+TEST_CSV_FILEPATH = os.path.join(script_dirpath, r'data\test.csv')
+TEST_CSV_FILEPATH_OUT = os.path.join(script_dirpath, r'data\test_out.csv')
+MODEL_FILEPATH = os.path.join(script_dirpath, r'model.h5')
+VOCAB_SIZE = 10000
 BATCH_SIZE = 64
 
 
@@ -48,7 +52,7 @@ def preprocess_data(data_raw):
     # replace space-like with spaces
     data[:, 1] = np.vectorize(lambda x: re.sub(r'[\s]+', ' ', x))(data[:, 1])
     # remove start and end single quotes
-    data[:, 1] = np.vectorize(lambda x: re.sub(r'(^|\s)[\'?]([\w\']+)[\'?]', r'\1\2', x))(data[:, 1])
+    data[:, 1] = np.vectorize(lambda x: re.sub(r'(^|\s)\'?([\w\']+\w+)\'?', r'\1\2', x))(data[:, 1])
     # strip
     data[:, 1] = np.vectorize(lambda x: x.strip())(data[:, 1])
 
@@ -91,6 +95,7 @@ def build_model(input_length):
     # model.add(LSTM(100, dropout=0.3, recurrent_dropout=0.3))
     # model.add(Dense(2, activation='softmax'))
 
+    model.add(Bidirectional(LSTM(200, return_sequences=True, dropout=0.5, recurrent_dropout=0.5)))
     model.add(LSTM(200, return_sequences=True, dropout=0.5, recurrent_dropout=0.5))
     model.add(Conv1D(filters=2, kernel_size=1, activation='relu'))
     model.add(GlobalAveragePooling1D())
@@ -149,7 +154,7 @@ def main():
     class_weight = sklearn.utils.class_weight.compute_class_weight('balanced',
                                                                    np.unique(train_val_data[:, 2]),
                                                                    train_val_data[:, 2])
-    callbacks = [EarlyStopping(patience=3),
+    callbacks = [EarlyStopping(patience=2),
                  ModelCheckpoint(MODEL_FILEPATH, save_best_only=True),
                  Metrics()]
     model.fit(X, Y,
