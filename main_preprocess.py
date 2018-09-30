@@ -8,7 +8,13 @@ from keras.callbacks import EarlyStopping, ModelCheckpoint
 from keras.preprocessing.text import Tokenizer
 from keras.preprocessing.sequence import pad_sequences
 from keras.models import Sequential
-from keras.layers import Dense, Embedding, LSTM, SpatialDropout1D, GlobalAveragePooling1D, Permute, Activation, Conv1D
+from keras.layers import Dense
+from keras.layers import Embedding
+from keras.layers import LSTM
+from keras.layers import SpatialDropout1D
+from keras.layers import GlobalAveragePooling1D
+from keras.layers import Activation
+from keras.layers import Conv1D
 from keras.callbacks import Callback
 from keras.utils.np_utils import to_categorical
 from sklearn.metrics import f1_score, recall_score, precision_score
@@ -17,37 +23,41 @@ from keras import backend as K
 
 TRAIN_CSV_FILEPATH = r'C:\Users\booga\Dropbox\projects\TweetsSentimentAnalysis\data\train.csv'
 TEST_CSV_FILEPATH = r'C:\Users\booga\Dropbox\projects\TweetsSentimentAnalysis\data\test.csv'
+TEST_CSV_FILEPATH_OUT = r'C:\Users\booga\Dropbox\projects\TweetsSentimentAnalysis\data\test_out.csv'
 MODEL_FILEPATH = r'C:\Users\booga\Dropbox\projects\TweetsSentimentAnalysis\model.h5'
-VOCAB_SIZE = 10000
+VOCAB_SIZE = 6000
 BATCH_SIZE = 64
 
 
 def hashtag_split_func(x):
-    return " ".join([a for a in re.split('([A-Z][a-z]+)', x.group(1)) if a])
+    return " ".join([a for a in re.split(r'([A-Z][a-z]+)', x.group(1)) if a])
 
 
 # string manipulation that removes links, breaks hashtags lower case etc
 def preprocess_data(data_raw):
     data = data_raw
     # split hashtags
-    data[:, 1] = np.vectorize(lambda x: re.sub('[#|@](\w+)', hashtag_split_func, x))(data[:, 1])
+    data[:, 1] = np.vectorize(lambda x: re.sub(r'[#|@](\w+)', hashtag_split_func, x))(data[:, 1])
     # make lower case
     data[:, 1] = np.vectorize(lambda x: x.lower())(data[:, 1])
     # remove links
-    data[:, 1] = np.vectorize(lambda x: re.sub('http\S+', '', x))(data[:, 1])
-    data[:, 1] = np.vectorize(lambda x: re.sub('\S+://\S+', '', x))(data[:, 1])
+    data[:, 1] = np.vectorize(lambda x: re.sub(r'http\S+', '', x))(data[:, 1])
+    data[:, 1] = np.vectorize(lambda x: re.sub(r'\S+://\S+', '', x))(data[:, 1])
     # remove non alpha-numeric and space-like
-    data[:, 1] = np.vectorize(lambda x: re.sub('[^0-9a-zA-Z\s\']', '', x))(data[:, 1])
+    data[:, 1] = np.vectorize(lambda x: re.sub(r'[^0-9a-zA-Z\s\']', '', x))(data[:, 1])
     # replace space-like with spaces
-    data[:, 1] = np.vectorize(lambda x: re.sub('[\s]+', ' ', x))(data[:, 1])
+    data[:, 1] = np.vectorize(lambda x: re.sub(r'[\s]+', ' ', x))(data[:, 1])
+    # remove start and end single quotes
+    data[:, 1] = np.vectorize(lambda x: re.sub(r'(^|\s)[\'?]([\w\']+)[\'?]', r'\1\2', x))(data[:, 1])
     # strip
     data[:, 1] = np.vectorize(lambda x: x.strip())(data[:, 1])
 
-    # remove empty text rows
-    data = data[np.vectorize(lambda x: len(x) > 0)(data[:, 1]), :]
+    # remove empty text rows, commented because of the test CSV filling requirement
+    # data = data[np.vectorize(lambda x: len(x) > 0)(data[:, 1]), :]
     return data
 
-#used to print F1 recall and precision while training, not used for early stop
+
+# used to print F1 recall and precision while training, not used for early stop
 class Metrics(Callback):
     def on_epoch_end(self, batch, logs={}):
         predict = np.argmax(np.asarray(self.model.predict(self.validation_data[0])), axis=1)
@@ -58,21 +68,23 @@ class Metrics(Callback):
         return
 
 
-
+# loads the trained network, loads test csv, predict label and saves csv file with predicted labels
 def predict_test(tokenizer, max_words_in_tweets):
-    test_data_raw = pd.read_csv(TEST_CSV_FILEPATH).values
+    csv = pd.read_csv(TEST_CSV_FILEPATH)
+    test_data_raw = csv.values
     test_data = preprocess_data(test_data_raw)
     X_test = tokenizer.texts_to_sequences(test_data[:, 1])
     X_test = pad_sequences(X_test, max_words_in_tweets)
     model = keras.models.load_model(MODEL_FILEPATH)
-    predictions = model.predict(X_test)
-    return np.argmax(predictions, axis=1)
-
+    predictions_categorical = model.predict(X_test)
+    predictions = np.argmax(predictions_categorical, axis=1)
+    csv['label'] = predictions
+    csv.to_csv(TEST_CSV_FILEPATH_OUT)
 
 
 def build_model(input_length):
-    #TODO: use glove embedding
-    #TODO: pretrain the net as a LM
+    # TODO: use glove embedding
+    # TODO: pretrain the net as a LM
     model = Sequential()
     model.add(Embedding(VOCAB_SIZE, 300, input_length=input_length))
     model.add(SpatialDropout1D(0.5))
@@ -86,6 +98,35 @@ def build_model(input_length):
 
     model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['acc'])
     return model
+
+
+# prints the n most significant words, scored by the word's contribution to the 1 probability minus
+# the contribution to the 0 probability, just before the GAP layer is done.
+def get_significant_words(X, tokenizer, n=100):
+    model = keras.models.load_model(MODEL_FILEPATH)
+    word_to_score = defaultdict(list)
+    post_conv1d_func = K.function([model.input, K.learning_phase()], [model.layers[-3].output])
+    # inverse tokenizer words dictionary, now maps index -> word
+    ind_to_word = {index: word for word, index in tokenizer.word_index.items()}
+    # this is the padding \ out of vocabulary word
+    ind_to_word[0] = 'N/A'
+    for t in tqdm.tqdm(range(X.shape[0] // BATCH_SIZE)):
+        start = t * BATCH_SIZE
+        end = min((t + 1) * BATCH_SIZE, X.shape[0])
+        seqs = X[start:end, :]
+        # the output is shape is timesteps x 2
+        out = post_conv1d_func([seqs, 0.0])[0]
+        # the word's score is the contribution to the 1 probability minus the contribution to 0
+        scores = out[:, :, 1] - out[:, :, 0]
+        for i in range(seqs.shape[0]):
+            for j in range(seqs.shape[1]):
+                word = ind_to_word[seqs[i, j]]
+                word_to_score[word].append(scores[i, j])
+    word_to_avg_score = {word: np.mean(score_list) for word, score_list in word_to_score.items()}
+    # sorts the words by their average scores, high score means big contribution
+    sorted_word_avg_score = sorted(word_to_avg_score.items(), key=lambda x: x[1])
+    return sorted_word_avg_score[-n:]
+
 
 def main():
     train_val_data_raw = pd.read_csv(TRAIN_CSV_FILEPATH).values
@@ -111,39 +152,14 @@ def main():
     callbacks = [EarlyStopping(patience=3),
                  ModelCheckpoint(MODEL_FILEPATH, save_best_only=True),
                  Metrics()]
-    # model.fit(X, Y,
-    #           validation_split=0.25,
-    #           epochs=50,
-    #           batch_size=BATCH_SIZE,
-    #           callbacks=callbacks,
-    #           class_weight=class_weight)
-    print(predict_test(tokenizer, sequence_words_amount))
+    model.fit(X, Y,
+              validation_split=0.25,
+              epochs=50,
+              batch_size=BATCH_SIZE,
+              callbacks=callbacks,
+              class_weight=class_weight)
+    predict_test(tokenizer, sequence_words_amount)
     print(get_significant_words(X, tokenizer))
-
-
-def get_significant_words(X, tokenizer, n=100):
-    model = keras.models.load_model(MODEL_FILEPATH)
-    word_to_score = defaultdict(list)
-    foo = K.function([model.input, K.learning_phase()], [model.layers[-3].output])
-    # inverse tokenizer words
-    ind_to_word = {v: k for k, v in tokenizer.word_index.items()}
-    ind_to_word[0] = 'N/A'
-    for t in tqdm.tqdm(range(X.shape[0] // BATCH_SIZE)):
-        start = t * BATCH_SIZE
-        end = min((t + 1) * BATCH_SIZE, X.shape[0])
-        seqs = X[start:end, :]
-        out = foo([seqs, 0.0])[0]
-        scores = out[:, :, 1] - out[:, :, 0]
-        for i in range(seqs.shape[0]):
-            for j in range(seqs.shape[1]):
-                word = ind_to_word[seqs[i, j]]
-                word_to_score[word].append(scores[i, j])
-    # avg word_to_score
-    word_to_avg_score = {k: np.mean(v) for k, v in word_to_score.items()}
-    sorted_word_avg_score = sorted(word_to_avg_score.items(), key=lambda x: x[1])
-    return sorted_word_avg_score[-n:]
-
-
 
 
 if __name__ == '__main__':
